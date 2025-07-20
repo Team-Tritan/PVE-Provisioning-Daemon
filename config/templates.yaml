@@ -1,0 +1,19 @@
+templates:
+  debian12:
+    id: 9000
+    name: "Debian 12"
+    description: "Debian 12 Bookworm CloudInit"
+    arch: "amd64"
+    default_user: "vmuser"
+    storage: "pve-a"  
+
+defaults:
+  cores: 2
+  memory: 2048
+  disk_size: "10G"
+  storage: "pve-a" 
+  network:
+    bridge: "vmbr0"
+    model: "virtio"
+    vlan: 3604
+    speed: 125
