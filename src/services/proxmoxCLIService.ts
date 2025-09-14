@@ -3,8 +3,7 @@ import { configManager } from "../config/configManager";
 import { VMIdManager, sanitizeVMName } from "../utils/helpers";
 import { ProvisionOptions, ProvisionResult } from "../types/api";
 import { DatabaseService } from "./databaseService";
-
-export class VMProvisioningService {
+export class ProxmoxService {
   public static async provisionVM(
     opts: ProvisionOptions
   ): Promise<ProvisionResult> {
@@ -177,7 +176,7 @@ export class VMProvisioningService {
   /**
    * Start the VM
    */
-  private static async startVM(vmid: number): Promise<void> {
+  public static async startVM(vmid: number): Promise<void> {
     console.log(`🚀 Starting VM ${vmid}...`);
     await runCommand(`qm start ${vmid}`);
     console.log(`✅ VM ${vmid} started successfully`);
@@ -361,15 +360,126 @@ export class VMProvisioningService {
       console.log(`📊 Getting stats for VM ${vmid}...`);
 
       const status = await this.getVMStatus(vmid);
-
       if (status === "not_found") {
         throw new Error(`VM ${vmid} not found`);
+      }
+
+      let ramUsed = null;
+      let ramTotal = null;
+      let cpuCount = null;
+      let cpuUsage = null;
+      let diskUsed = null;
+      let diskRead = null;
+      let diskWrite = null;
+      let netIn = null;
+      let netOut = null;
+      let uptime = null;
+
+      try {
+        const verboseOutput = await runCommand(`qm status ${vmid} --verbose`);
+        const lines = verboseOutput.split("\n").map((l) => l.trim());
+
+        for (const line of lines) {
+          if (line.startsWith("mem:")) {
+            ramUsed = parseInt(line.split(":")[1].trim(), 10);
+          }
+          if (line.startsWith("maxmem:")) {
+            ramTotal = parseInt(line.split(":")[1].trim(), 10);
+          }
+          if (line.startsWith("cpus:")) {
+            cpuCount = parseInt(line.split(":")[1].trim(), 10);
+          }
+          if (line.startsWith("cpu:")) {
+            // The value should always be present and numeric, e.g. "cpu: 0.01"
+            const val = line.split(":")[1]?.trim();
+            let parsed = 0.01; // Default to 0.01 (1%) if missing or invalid
+            if (val !== undefined && val !== "" && val.toLowerCase() !== "nan") {
+              const floatVal = Number(val);
+              // Accept zero as valid, only fallback if NaN
+              if (!isNaN(floatVal)) {
+                parsed = floatVal;
+              }
+            }
+            cpuUsage = parsed;
+          }
+          if (line.startsWith("disk:")) {
+            diskUsed = parseInt(line.split(":")[1].trim(), 10);
+          }
+          if (line.startsWith("diskread:")) {
+            diskRead = parseInt(line.split(":")[1].trim(), 10);
+          }
+          if (line.startsWith("diskwrite:")) {
+            diskWrite = parseInt(line.split(":")[1].trim(), 10);
+          }
+          if (line.startsWith("netin:")) {
+            netIn = parseInt(line.split(":")[1].trim(), 10);
+          }
+          if (line.startsWith("netout:")) {
+            netOut = parseInt(line.split(":")[1].trim(), 10);
+          }
+          if (line.startsWith("uptime:")) {
+            uptime = parseInt(line.split(":")[1].trim(), 10);
+          }
+        }
+      } catch (err) {
+        console.warn(`⚠️  Could not get verbose stats for VM ${vmid}:`, err);
+      }
+
+      // Fallback to config if verbose stats are missing
+      if (!ramTotal || !diskUsed) {
+        try {
+          const configOutput = await runCommand(`qm config ${vmid}`);
+          const configLines = configOutput.split("\n").map((l) => l.trim());
+          for (const line of configLines) {
+            if (line.startsWith("memory:") && !ramTotal) {
+              ramTotal = parseInt(line.split(":")[1].trim(), 10);
+            }
+            if (line.startsWith("size:") && !diskUsed) {
+              diskUsed = line.split(":")[1].trim();
+            }
+          }
+        } catch (cfgErr) {
+          console.warn(`⚠️  Could not get config fallback for VM ${vmid}:`, cfgErr);
+        }
+      }
+
+      // Convert bytes to MB/GB for human-readable fields
+      function toMB(bytes: number | null) {
+        return bytes !== null ? +(bytes / (1024 * 1024)).toFixed(2) : null;
+      }
+      function toGB(bytes: number | null) {
+        return bytes !== null ? +(bytes / (1024 * 1024 * 1024)).toFixed(2) : null;
       }
 
       const stats = {
         vmid,
         status,
         timestamp: new Date().toISOString(),
+        ram_used: ramUsed,
+        ram_used_mb: toMB(ramUsed),
+        ram_used_gb: toGB(ramUsed),
+        ram_total: ramTotal,
+        ram_total_mb: toMB(ramTotal),
+        ram_total_gb: toGB(ramTotal),
+        cpu_count: cpuCount,
+        cpu_usage: typeof cpuUsage === "number" ? cpuUsage : 0.01,
+        cpu_usage_percent: typeof cpuUsage === "number" ? +(cpuUsage * 100).toFixed(2) : 1.0,
+        disk_used: diskUsed,
+        disk_used_mb: toMB(typeof diskUsed === "string" ? parseInt(diskUsed, 10) : diskUsed),
+        disk_used_gb: toGB(typeof diskUsed === "string" ? parseInt(diskUsed, 10) : diskUsed),
+        disk_read: diskRead,
+        disk_read_mb: toMB(diskRead),
+        disk_read_gb: toGB(diskRead),
+        disk_write: diskWrite,
+        disk_write_mb: toMB(diskWrite),
+        disk_write_gb: toGB(diskWrite),
+        net_in: netIn,
+        net_in_mb: toMB(netIn),
+        net_in_gb: toGB(netIn),
+        net_out: netOut,
+        net_out_mb: toMB(netOut),
+        net_out_gb: toGB(netOut),
+        uptime,
       };
 
       console.log(`✅ Retrieved stats for VM ${vmid}`);
@@ -377,6 +487,65 @@ export class VMProvisioningService {
     } catch (error) {
       console.error(`❌ Failed to get stats for VM ${vmid}:`, error);
       throw error;
+    }
+  }
+
+  /**
+   * List available ISOs
+   */
+  public static async listISOs(): Promise<string[]> {
+    const isoDir = "/var/lib/vz/template/iso";
+    try {
+      const output = await runCommand(`ls ${isoDir}`);
+      const files = output
+        .split("\n")
+        .map((f) => f.trim())
+        .filter((f) => f.endsWith(".iso"));
+      return files;
+    } catch (err) {
+      console.error(`❌ Failed to list ISOs:`, err);
+      return [];
+    }
+  }
+
+  /**
+   * Mount an ISO to a VM
+   */
+  public static async mountISO(vmid: number, iso: string): Promise<void> {
+    const isoPath = `/var/lib/vz/template/iso/${iso}`;
+    try {
+      // Attach ISO to ide2 (common for Proxmox)
+      await runCommand(`qm set ${vmid} --ide2 ${isoPath},media=cdrom`);
+      console.log(`✅ Mounted ISO ${iso} to VM ${vmid}`);
+    } catch (err) {
+      console.error(`❌ Failed to mount ISO ${iso} to VM ${vmid}:`, err);
+      throw err;
+    }
+  }
+
+  /**
+   * Set VM boot order (e.g. "cdrom,scsi0")
+   */
+  public static async setBootOrder(vmid: number, order: string): Promise<void> {
+    try {
+      await runCommand(`qm set ${vmid} --boot order=${order}`);
+      console.log(`✅ Set boot order for VM ${vmid}: ${order}`);
+    } catch (err) {
+      console.error(`❌ Failed to set boot order for VM ${vmid}:`, err);
+      throw err;
+    }
+  }
+
+  /**
+   * Set VM notes
+   */
+  public static async setVMNotes(vmid: number, notes: string): Promise<void> {
+    try {
+      await runCommand(`qm set ${vmid} --description "${notes.replace(/"/g, '\\"')}"`);
+      console.log(`✅ Set notes for VM ${vmid}`);
+    } catch (err) {
+      console.error(`❌ Failed to set notes for VM ${vmid}:`, err);
+      throw err;
     }
   }
 }

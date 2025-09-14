@@ -3,6 +3,8 @@ import { routes } from "./routes";
 import { configManager } from "./config/configManager";
 import { ShellExecutor } from "./utils/shell";
 import { DatabaseService } from "./services/databaseService";
+import cors from "@fastify/cors"; 
+
 
 async function startServer() {
   try {
@@ -35,6 +37,7 @@ async function startServer() {
       },
     });
 
+    await fastify.register(cors, { origin: true });
     await fastify.register(routes);
 
     await fastify.listen({
